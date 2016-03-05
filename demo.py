@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Copyright (c) 2016, Shane Frederic F. Carr
 # 
 # Permission to use, copy, modify, and/or distribute this software for any
