@@ -21,7 +21,7 @@ class Spherical(GPy.kern.Kern):
     This class implements the required methods for a {GPy} kernel."""
 
     def __init__(self, input_dim, active_dims=None, variance=1., lengthscale=1., name="my_great_circle"):
-        super(SqExpSpherical, self).__init__(input_dim, active_dims, name)
+        super(Spherical, self).__init__(input_dim, active_dims, name)
         self.variance = GPy.core.Param("variance", variance, GPy.core.parameterization.transformations.Logexp())
         self.lengthscale = GPy.core.Param("lengthscale", lengthscale, GPy.core.parameterization.transformations.Logexp())
         self.link_parameters(self.variance, self.lengthscale)

@@ -14,13 +14,13 @@
 
 import os
 import random
-import ase.io
+
 from ase.constraints import FixAtoms
+import ase.io
+import ase.lattice.general_surface
+import ase.lattice.surface
 from ase.optimize import BFGS
-from ase.parallel import paropen
-import GPy
 import numpy as np
-import .kernels
 
 COLORS = ["Amaranth","Amber","Amethyst","Apricot","Aquamarine","Azure","Beige","Black","Blue","Blush","Bronze","Brown","Burgundy","Byzantium","Carmine","Cerise","Cerulean","Champagne","Chocolate","Coffee","Copper","Coral","Crimson","Cyan","Emerald","Erin","Gold","Gray","Green","Harlequin","Indigo","Ivory","Jade","Lavender","Lemon","Lilac","Lime","Magenta","Maroon","Mauve","Ocher","Olive","Orange","Orchid","Peach","Pear","Periwinkle","Pink","Plum","Puce","Purple","Raspberry","Red","Rose","Ruby","Salmon","Sangria","Sapphire","Scarlet","Silver","Tan","Taupe","Teal","Turquoise","Violet","Viridian","White"];
 ADJECTIVES = ["Adorable","Beautiful","Elegant","Fancy","Glamorous","Handsome","Long","Magnificent","Plain","Quaint","Sparkling","Ugly","Unsightly","Chubby","Crooked","Curved","Skinny","Brave","Calm","Delightful","Eager","Faithful","Gentle","Happy","Jolly","Lively","Obedient","Proud","Relieved","Silly","Thankful","Victorious","Witty","Zealous"];
@@ -54,25 +54,40 @@ def make_name_with_mpi(mpi):
     mpi.world.broadcast(name_seed, 0)
     return make_name_with_seed(name_seed)
 
-def relax_surface_cell(surf, calculator, log_dir=None, write_logs=True):
+def relax_surface_cell(cell, calculator, log_dir=None, write_logs=True,
+                       hkl=(0,0,1), width=1,
+                       fluid_layers=1, fixed_layers=1):
     """Run a relaxation procedure on an empty surface."""
 
+    # Print header
     if write_logs:
         print("BASC: RELAXING EMPTY SURFACE CELL")
-        print("Job Name: %s" % name)
-        print("Compound: %s" % surf.get_name())
+        print("Compound: %s" % cell.get_name())
+        print("log_dir: %s" % log_dir)
+        print("hkl: %s" % str(hkl))
+        print("width: %d" % width)
+        print("fluid_layers: %d" % fluid_layers)
+        print("fixed_layers: %d" % fixed_layers)
 
-    # Make the log directory if necessary
-    try:
-        os.mkdir(log_dir)
-    except OSError:
-        pass
+    # Set up system
+    total_layers = fluid_layers + fixed_layers
+    surf = ase.lattice.general_surface.surface(
+        cell.repeat((width,width,1)),
+        hkl,
+        total_layers,
+        15.0)
+    number_of_fixed_atoms = len(surf) * fixed_layers / total_layers
+    c = FixAtoms(
+        indices=list(range(number_of_fixed_atoms)))
+    surf.set_constraint(c)
 
     # Perform the relaxation
     n = 0
     while True:
         n += 1
         job_prefix = "%s/relax_surface_cell_%000d" % (log_dir, n)
+        try: os.mkdir(job_prefix)
+        except OSError: pass
         traj_path = "%s/optim.traj" % job_prefix
         bak_path = "%s/backup.pkl" % job_prefix
 
@@ -93,7 +108,9 @@ def relax_surface_cell(surf, calculator, log_dir=None, write_logs=True):
         except np.linalg.linalg.LinAlgError:
             # We encountered a linalg error, probably "Eigenvalues did not
             # converge". We can restart BFGS at the previous frame.
-            print("Encountered LinAlgError; restarting from prev BFGS frame")
+            if write_logs:
+                print("Encountered LinAlgError; restarting from "
+                      "previous BFGS frame")
             surf = ase.io.read(traj_path)
 
         else:
@@ -118,34 +135,4 @@ def add_adsorbate_fractional(surf, adsorbate, x, y, z, mol_index):
             x*ay + y*by
         ),
         mol_index=mol_index)
-
-def make_periodic_kernel(name, active_dims, variance, lengthscale, range):
-    kern = GPy.kern.StdPeriodic(
-        input_dim=1, active_dims=active_dims,
-        variance=variance, lengthscale=lengthscale,
-        period=range,
-        name=name)
-    kern.variance.constrain_fixed(warning=False)
-    kern.period.constrain_fixed(warning=False)
-    kern.lengthscale.constrain_bounded(range/16., range/1., warning=False)
-    return kern
-
-def make_rbf_kernel(name, active_dims, variance, lengthscale, range):
-    kern = GPy.kern.RBF(
-        input_dim=1, active_dims=active_dims,
-        variance=variance, lengthscale=lengthscale,
-        name=name)
-    kern.variance.constrain_fixed(warning=False)
-    kern.lengthscale.constrain_bounded(range/16., range/1., warning=False)
-    return kern
-
-def make_spherical_kernel(name, active_dims, variance, lengthscale):
-    kern = kernels.Spherical(
-        input_dim=1, active_dims=active_dims,
-        variance=variance, lengthscale=lengthscale, period=period,
-        name=name)
-    kern.variance.constrain_fixed(warning=False)
-    kern.period.constrain_fixed(warning=False)
-    kern.lengthscale.constrain_bounded(np.pi/16, np.pi/3, warning=False)
-    return kern
 

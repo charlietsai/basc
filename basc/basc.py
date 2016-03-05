@@ -13,21 +13,64 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 from ase.calculators.lj import LennardJones
+import GPy
+import numpy as np
+import scipy.stats
 
-import .fit_lengthscales
-import .utils
+from . import utils
 from .expected_improvement import GPExpectedImprovement
+from .kernels import Spherical
+from .sobol_lib import i4_sobol
 
 class BASC(object):
-    def __init__(self, relaxed_surf, adsorbate, phi_length=0, seed=0,
-                 xbounds=(0,1), ybounds=(0,1), zbounds=(1.5,2.5),
-                 noise_variance=1e-4):
+    """
+    This class encapsulates functionality for the majority of operations
+    relating to the BASC framework.
+    """
+
+    def __init__(self, relaxed_surf, adsorbate, phi_length=0, mol_index=0,
+                 noise_variance=1e-4, seed=0, write_logs=True,
+                 xbounds=(0,1), ybounds=(0,1), zbounds=(1.5,2.5)):
+        """
+        -- {relaxed_surf}: An empty surface cell onto which the adsorbate
+           molecule can be placed.
+
+        -- {adsorbate}: The desired adsorbate molecule.
+
+        -- {phi_length}: The period over which the "phi" Euler angle is
+           periodic. A setting of 0 means that the molecule is symmetric
+           about the z axis, which is the case for well-formed CO and CO2 as
+           well as single atoms.
+
+        -- {mol_index}: Index of the atom within the adsorbate that should be
+           used as the reference point for rotations and placement on the
+           surface. An atom near the center of the molecule should be chosen.
+
+        -- {noise_variance}: The variance of the likelihood function in the
+           GP. Smaller numbers give better performance, but too small can
+           lead to numerical instability.
+
+        -- {seed}: Seed for random number generators and the SOBOL sequence.
+           Multiple runs with the same seed will produce the same result.
+
+        -- {xbounds/ybounds}: Bounds for the spatial coordinates.  If using a
+           surface in which the unit cell is copied multiple times in x/y,
+           you should lower the upper bound for x and y to the point at which
+           they are periodic.
+
+        -- {zbounds}: Bounds for the z coordinate.  It should cover a wide
+           enough range such that the molecule is sufficiently close to the
+           surface for any Euler angles, but not so close that the
+           adsorbate's atoms are placed deep inside the surface.
+        """
+
         self.relaxed_surf = relaxed_surf
         self.adsorbate = adsorbate
-        self.seed = seed
+        self.mol_index = mol_index
         self.noise_variance = noise_variance
-        self.X = np.array()
-        self.Y = np.array()
+        self.seed = seed
+        self.X = np.array([])
+        self.Y = np.array([])
         self._training_data = None
         self._calculator = None
 
@@ -54,16 +97,46 @@ class BASC(object):
             "sph": np.pi/8
         }
 
+        # Print header
+        if write_logs:
+            print("BASC: INITIALIZED")
+            print("Surface: %s" % self.relaxed_surf.get_name())
+            print("Adsorbate: %s" % self.adsorbate.get_name())
+            print("phi_length: %f" % phi_length)
+            print("mol_index: %d" % mol_index)
+            print("noise_variance: %f" % noise_variance)
+            print("seed: %d" % seed)
+            print("xbounds: %s" % str(xbounds))
+            print("ybounds: %s" % str(ybounds))
+            print("zbounds: %s" % str(zbounds))
+
     def atoms_from_parameters(self, x, y, z, p, t, s):
         """Return an ASE Atoms object corresponding to the given parameters
 
-        If using the five-dimensional system, pass 0 for {p}."""
+        If using the five-dimensional system, pass 0 for {p}.
+        """
 
         adsorbate = self.adsorbate.copy()
         adsorbate.rotate_euler(phi=p, theta=t, psi=s)
         surf = self.relaxed_surf.copy()
         utils.add_adsorbate_fractional(
             surf, self.adsorbate, x, y, z, self.mol_index)
+        return surf
+
+    def atoms_from_point(self, point):
+        """Returns an ASE Atoms object corresponding to the given point
+
+        The difference between {atoms_from_point} and {atoms_from_parameters}
+        is that {atoms_from_point} takes the points as a tuple and also
+        automatically accounts for the five-dimensional case of CO/CO2.
+        """
+
+        if self.use_sph:
+            # Note that incl/azim are converted to lat/lon inside of 
+            x,y,z,incl,azim = point
+            surf = self.atoms_from_parameters(x,y,z,0,incl,azim)
+        else:
+            surf = self.atoms_from_parameters(*point)
         return surf
 
     def objective_fn(self, point, calculator=None):
@@ -82,7 +155,7 @@ class BASC(object):
             raise RuntimeError("You must specify a calculator as a keyword "
                                "argument or via the {set_calculator} method")
 
-        surf = self.atoms_from_parameters(*point)
+        surf = self.atoms_from_point(point)
         surf.set_calculator(calculator)
         pot = surf.get_potential_energy()
         if pot > 0:
@@ -120,35 +193,35 @@ class BASC(object):
 
         # Construct the kernel
         # FIXME: lengthscale range for z?
-        kern_x = utils.make_make_periodic_kernel(
+        kern_x = make_periodic_kernel(
             "x", [0], kernel_variance, self.lengthscales["x"],
             self.bnd_range[0])
-        kern_y = utils.make_make_periodic_kernel(
+        kern_y = make_periodic_kernel(
             "y", [1], kernel_variance, self.lengthscales["y"],
             self.bnd_range[1])
-        kern_z = utils.make_rbf_kernel(
+        kern_z = make_rbf_kernel(
             "z", [2], kernel_variance, self.lengthscales["z"],
             self.bnd_range[2])
 
         if self.use_sph:
-            kern_sph = utils.make_spherical_kernel(
+            kern_sph = make_spherical_kernel(
                 "sph", [3,4], kernel_variance, self.lengthscales["sph"])
             kern = kern_x * kern_y * kern_z * kern_sph
 
         else:
-            kern_x = utils.make_make_periodic_kernel(
+            kern_x = make_periodic_kernel(
                 "p", [3], kernel_variance, self.lengthscales["x"],
                 self.bnd_range[3])
-            kern_z = utils.make_rbf_kernel(
+            kern_z = make_rbf_kernel(
                 "t", [4], kernel_variance, self.lengthscales["z"],
                 self.bnd_range[4])
-            kern_y = utils.make_make_periodic_kernel(
+            kern_y = make_periodic_kernel(
                 "s", [5], kernel_variance, self.lengthscales["y"],
                 self.bnd_range[5])
             kern = kern_x * kern_y * kern_z * kern_p * kern_t * kern_s
 
         # Construct the likelihood and mean function
-        likelihood = GPy.likelihoods.Gaussian(variance=noise_variance)
+        likelihood = GPy.likelihoods.Gaussian(variance=self.noise_variance)
         likelihood.variance.constrain_fixed(warning=False)
         mean_function = GPy.mappings.Constant(
             (5 if self.use_sph else 6), 1, prior_mean)
@@ -157,20 +230,24 @@ class BASC(object):
         # Make GP
         gp = GPExpectedImprovement(
             X, D, kern, likelihood, mean_function, self.bounds,
-            name="BASC")
+            seed=self.seed, name="BASC")
         return gp
 
-    def auto_gp(self, X, D, variance_transform=None, ei_probe_n=100):
+    def auto_gp(self, X, D, variance_transform=None, ei_probe_n=100,
+                write_logs=True):
         """Make a GP using automatic values for mean and variance
 
         This function ensures that expected improvement is well-defined
         over the parameter space.
 
         -- {variance_transform} (optional, default None): a lambda
-           function taking a variance and returning the variance
-           transformed by an arbitrary function.  For example, if one
-           wanted to exaggerate small variance values, one could pass:
-               lambda v: v*(100+v)/(1+v)
+           function taking a variance and a list of values and returning
+           the variance transformed by an arbitrary function.  For
+           example, if one wanted to exaggerate small variance values,
+           one could pass:
+               lambda v,Y: v*(100+v)/(1+v)
+           One can also entirely redefine the variance:
+               lambda v,Y: np.mean(Y)-np.min(Y)
 
         -- {ei_probe_n} (optional, default 100): the number of SOBOL
            points at which to evaluate the expected improvement to ensure
@@ -181,20 +258,28 @@ class BASC(object):
         if variance_transform is not None:
             var = variance_transform(var)
 
-        print("MGP: Mu and Var: %.6f, %.6f" % (mu, var))
+        # Ensure that variance is always positive and nonzero
+        if var < np.spacing(1):
+            var = np.sqrt(np.spacing(1))
+
+        if write_logs:
+            print("MGP: Mu and Var: %.6f, %.6f" % (mu, var))
 
         eipts = self.sobol_points(ei_probe_n)
         while True:
-            gp = gp_with(X, D, mu, var)
+            gp = self.gp_with(X, D, mu, var)
             if np.median(gp.expected_improvement(eipts)) <= float("-inf"):
-                print("MGP: Doubling variance for EI")
                 var *= 2
+                if write_logs:
+                    print("note: doubled variance to %.6f for "
+                          "numerical stability" % var)
             else:
                 break
 
         return gp
 
-    def fit_lengthscales(self, n=500, calculator=None):
+    def fit_lengthscales(self, n=500, calculator=None, write_logs=True,
+                         variance_transform=None):
         """Use Lennard-Jones and BFGS to optimize the length scales
 
         The default length scales will not work for every system.  In
@@ -202,44 +287,55 @@ class BASC(object):
         data points using a cheap {calculator}, defaulting to Lennard-
         Jones, and then use BFGS to maximize the likelihood of the GP
         while varying the length scales.
+
+        -- {variance_transform} (optional, default None): see auto_gp
+           for details.
         """
 
         if calculator is None:
             calculator = LennardJones()
 
+        if write_logs:
+            print("BASC: FITTING LENGTH SCALES")
+            print("n: %d" % n)
+            print("calculator: %s" % str(calculator))
+
         # Pre-process: generate data (relatively fast if LJ is used)
         X = self.sobol_points(n)
-        if self.use_sph:
-            D = np.array([
-                    self.objective_fn((x,y,z,0,t,s), calculator)
-                    for x,y,z,t,s in X
-                ]).reshape(n,1)
-        else:
-            D = np.array([
-                    self.objective_fn((x,y,z,p,t,s), calculator)
-                    for x,y,z,p,t,s in X
-                ]).reshape(n,1)
+        D = np.array([
+            self.objective_fn(point, calculator)
+            for point in X
+        ]).reshape(n,1)
 
         mu,std = scipy.stats.norm.fit(D)
-        gp = self.gp_with(X, D, mu, std0**2, std0**2 * self.noise_factor)
+        var = std**2
+        if variance_transform is not None:
+            var = variance_transform(var, D)
+        gp = self.gp_with(X, D, mu, var)
 
-        # Run the optimizer (the slow step)
-        print gp
-        gp.optimize()
-        print gp
+        # Run the optimizer (the slower step)
+        if write_logs:
+            print "\n---\nBefore Optimization:\n"
+            print gp
+
+        gp.optimize(messages=write_logs)
+
+        if write_logs:
+            print "\n---\nAfter Optimization:\n"
+            print gp
 
         # Save results
-        self.lengthscales["x"] = gp.x.lengthscale
-        self.lengthscales["y"] = gp.y.lengthscale
-        self.lengthscales["z"] = gp.z.lengthscale
+        self.lengthscales["x"] = float(gp.kern.x.lengthscales)
+        self.lengthscales["y"] = float(gp.kern.y.lengthscales)
+        self.lengthscales["z"] = float(gp.kern.z.lengthscale)
         if self.use_sph:
-            self.lengthscales["sph"] = gp.sph.lengthscale
+            self.lengthscales["sph"] = float(gp.kern.sph.lengthscale)
         else:
-            self.lengthscales["p"] = gp.p.lengthscale
-            self.lengthscales["t"] = gp.t.lengthscale
-            self.lengthscales["s"] = gp.s.lengthscale
+            self.lengthscales["p"] = float(gp.kern.p.lengthscales)
+            self.lengthscales["t"] = float(gp.kern.t.lengthscale)
+            self.lengthscales["s"] = float(gp.kern.s.lengthscales)
 
-    def run_iteration(self, **kwargs):
+    def run_iteration(self, write_logs=True, **kwargs):
         """Run an iteration of Bayesian Optimization
 
         If no iterations had been run previously, default to using the
@@ -248,16 +344,37 @@ class BASC(object):
         Any keyword arguments will be passed to {auto_gp}.
         """
 
-        if len(self.X) == 0:
-            x = self.sobol_points(1)[0]
+        if len(self.X) < 4:
+            x = self.sobol_points(4)[len(self.X)]
         else:
-            gp = self.auto_gp(self.X, self.Y, **kwargs)
+            gp = self.auto_gp(self.X, self.Y, write_logs=write_logs, **kwargs)
             x = gp.max_expected_improvement()
-        y = self.objective_fn(x)
+
+        try:
+            y = self.objective_fn(x)
+        except RuntimeError:
+            # "Atoms too close!"
+            y = np.max(self.Y)
+            if write_logs:
+                print("ATOMS TOO CLOSE!  Returning maximum observation")
+
         self.add_xy(x, y)
 
+        if write_logs:
+            print("ITERATION: y=%f, x=%s" % (y, str(x)))
+
+    def best(self):
+        """Return the best observation from BASC"""
+
+        iter = np.argmin(self.Y)
+        y = self.Y[iter]
+        x = self.X[iter]
+        atoms = self.atoms_from_point(x)
+        return x,y,iter,atoms
+
     def add_xy(self, x, y):
-        self.X = np.append(self.X, x).reshape(len(self.X)+1, self.input_dim)
+        input_dim = 5 if self.use_sph else 6
+        self.X = np.append(self.X, x).reshape(len(self.X)+1, input_dim)
         self.Y = np.vstack(np.append(self.Y, y))
 
     @property
@@ -275,4 +392,30 @@ class BASC(object):
         """An array with the range of acceptable values for each parameter"""
         return self.bnd_upper - self.bnd_lower
 
-
+# Helper functions
+def make_periodic_kernel(name, active_dims, variance, lengthscale, range):
+    kern = GPy.kern.StdPeriodic(
+        input_dim=1, active_dims=active_dims,
+        variance=variance, lengthscale=lengthscale,
+        wavelength=range,  # i.e., period
+        name=name)
+    kern.variance.constrain_fixed(warning=False)
+    kern.wavelengths.constrain_fixed(warning=False)
+    kern.lengthscales.constrain_bounded(range/16., range/1., warning=False)
+    return kern
+def make_rbf_kernel(name, active_dims, variance, lengthscale, range):
+    kern = GPy.kern.RBF(
+        input_dim=1, active_dims=active_dims,
+        variance=variance, lengthscale=lengthscale,
+        name=name)
+    kern.variance.constrain_fixed(warning=False)
+    kern.lengthscale.constrain_bounded(range/16., range/1., warning=False)
+    return kern
+def make_spherical_kernel(name, active_dims, variance, lengthscale):
+    kern = Spherical(
+        input_dim=2, active_dims=active_dims,
+        variance=variance, lengthscale=lengthscale,
+        name=name)
+    kern.variance.constrain_fixed(warning=False)
+    kern.lengthscale.constrain_bounded(np.pi/16, np.pi/3, warning=False)
+    return kern

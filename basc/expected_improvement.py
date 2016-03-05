@@ -13,12 +13,15 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 import GPy
+import numpy as np
 import scipy.optimize
 import scipy.stats
 
 class GPExpectedImprovement(GPy.core.GP):
-    def __init__(self, bounds, *args, seed=0, **kwargs):
-        GPy.core.GP.__init__(self, *args, **kwargs)
+    def __init__(self, X, Y, kernel, likelihood, mean_function,
+                 bounds, seed=0, *args, **kwargs):
+        GPy.core.GP.__init__(self, X, Y, kernel, likelihood, mean_function,
+                             *args, **kwargs)
         self.bounds = bounds
         self.seed = seed
 
@@ -30,14 +33,11 @@ class GPExpectedImprovement(GPy.core.GP):
         return np.log((minY-mu)*improvement_cdf + var*improvement_pdf)
     
     def max_expected_improvement(self):
-        t1 = time.time()
         res = scipy.optimize.differential_evolution(
             lambda x: -self.expected_improvement(x.reshape(1, self.input_dim)),
             bounds = self.bounds,
             seed = self.seed
         )
-        t2 = time.time()
-        print("MEI: %d Function Evaluations (%.3f sec/eval)" % (res.nfev, (t2-t1)/res.nfev))
         if not res.success:
             raise Exception("Could not maximize expected improvement. %s" % res.message)
             return

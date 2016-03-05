@@ -87,6 +87,11 @@ class GPAWIterator(GPAW):
         self.initialize(atoms)
         self.observed_energies = []
 
+    @property
+    def current_energy(self):
+        """The current energy without any transformations."""
+        return GPAW.get_potential_energy(self)
+
 class GPAWTrained(GPAWIterator):
     """A GPAWIterator using a statistical model to reduce SCF iterations
     
@@ -115,15 +120,31 @@ class GPAWTrained(GPAWIterator):
         Returns an instance of {scipy.stats.norm}."""
         return self.energy_model.predict_from_trace(self.observed_energies)[0]
 
-    @property
-    def current_energy(self):
-        """The current energy without any transformations."""
-        return GPAW.get_potential_energy(self)
 
+def obtain_traces(atomses, niter=50, write_logs=True, **kwargs):
+    """Obtain a list of traces that can be used in {GPAWTrained}
 
-def obtain_trace(atoms, niter=50, **kwargs):
-    """Obtain a trace that can be used in {GPAWTrained}"""
+    -- {atomses}: A list of ASE Atoms objects to evaluate as the
+       training set.
+
+    -- {niter}: Number of iterations in each trace.  This number should
+       be large enough such that the final observation is sufficiently
+       close to the converged value.
+    """
+
+    # Print header
+    if write_logs:
+        print("OBTAINING TRACES")
+        print("niter: %d" % niter)
+        print("GPAW kwargs: %s" % str(kwargs))
+
     calculator = GPAWIterator(niter, **kwargs)
-    atoms.set_calculator(calculator)
-    calculator.run_all_iterations()
-    return calculator.observed_energies
+    traces = []
+    for atoms in atomses:
+        atoms.set_calculator(calculator)
+        calculator.run_all_iterations()
+        traces.append(calculator.observed_energies)
+        if write_logs:
+            print("TRACE: %s" % str(calculator.observed_energies))
+
+    return traces
