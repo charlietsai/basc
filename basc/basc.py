@@ -120,7 +120,7 @@ class BASC(object):
         adsorbate.rotate_euler(phi=p, theta=t, psi=s)
         surf = self.relaxed_surf.copy()
         utils.add_adsorbate_fractional(
-            surf, self.adsorbate, x, y, z, self.mol_index)
+            surf, adsorbate, x, y, z, self.mol_index)
         return surf
 
     def atoms_from_point(self, point):
