@@ -134,7 +134,7 @@ class BASC(object):
         if self.use_sph:
             # Note that incl/azim are converted to lat/lon inside of 
             x,y,z,incl,azim = point
-            surf = self.atoms_from_parameters(x,y,z,0,incl,azim)
+            surf = self.atoms_from_parameters(x, y, z, 0, incl, azim)
         else:
             surf = self.atoms_from_parameters(*point)
         return surf
@@ -233,37 +233,65 @@ class BASC(object):
             seed=self.seed, name="BASC")
         return gp
 
-    def auto_gp(self, X, D, variance_transform=None, ei_probe_n=100,
-                write_logs=True):
+    def auto_gp(self, X, D, ei_probe_n=100, write_logs=True,
+                variance_function=None, mean_function=None,
+                base_variance=None, lengthscale_influence=None):
         """Make a GP using automatic values for mean and variance
 
         This function ensures that expected improvement is well-defined
         over the parameter space.
 
-        -- {variance_transform} (optional, default None): a lambda
-           function taking a variance and a list of values and returning
-           the variance transformed by an arbitrary function.  For
-           example, if one wanted to exaggerate small variance values,
-           one could pass:
-               lambda v,Y: v*(100+v)/(1+v)
-           One can also entirely redefine the variance:
-               lambda v,Y: np.mean(Y)-np.min(Y)
-
         -- {ei_probe_n} (optional, default 100): the number of SOBOL
            points at which to evaluate the expected improvement to ensure
            that it is well-defined.
+
+        -- {variance_function} (optional): a lambda function taking a list
+           of function observations and returning the variance to be used
+           by the Gaussian kernels.  You want to use a variance value that
+           models the topology of the function. Large values will cause
+           more exploration, and small values will cause more exploitation.
+
+        -- {mean_function} (optional): like above, but for the mean rather
+           than the variance.
+
+        -- {base_variance} and {lengthscale_influence} (optional): values
+           to plug into the default explore-first-exploit-later variance
+           scheduling function:
+               base_variance * np.exp(1 - (len(D)*influence_frac)**2)
+           where {influence_frac} is from {observation_influence_fraction}
+           called with the provided {lengthscale_influence}.  If
+           {variance_function} is specified, it will take precendence.
         """
-        mu,std = scipy.stats.norm.fit(D)
-        var = std**2
-        if variance_transform is not None:
-            var = variance_transform(var)
+        # mu,std = scipy.stats.norm.fit(D)
+        # var = std**2
+        # nY = (3*len(D))//4
+        # mu = np.partition(D, nY)[nY]
+        # mu = np.mean(D)
+        # var = (mu-np.min(D))**2
+        # mu = -186.0
+        # var = 100 * np.exp(-(len(D)/70.)**2) + 1.
+
+        if variance_function is not None:
+            var = variance_function(D)
+        elif base_variance is not None and lengthscale_influence is not None:
+            influence_frac = self.observation_influence_fraction(
+                lengthscale_influence)
+            var = base_variance * np.exp(1 - (len(D)*influence_frac)**2)
+            if write_logs: print("influence frac: %f" % influence_frac)
+        else:
+            var = np.stdev(D)**2
+
+        if mean_function is not None:
+            mu = mean_function(D)
+        else:
+            mu = np.mean(D)
 
         # Ensure that variance is always positive and nonzero
         if var < np.spacing(1):
             var = np.sqrt(np.spacing(1))
 
         if write_logs:
-            print("MGP: Mu and Var: %.6f, %.6f" % (mu, var))
+            print("mu and var: %.6f, %.6f" % (mu, var))
 
         eipts = self.sobol_points(ei_probe_n)
         while True:
@@ -278,8 +306,32 @@ class BASC(object):
 
         return gp
 
+    def observation_influence_fraction(self, lengthscale_influence=2):
+        """What fraction of the parameter space will an observation incluence
+
+        This method is useful for calculating exploration/exploitation
+        scheduling tradeoffs.
+
+        -- {lengthscale_influence}: the number of length scales away that an
+           observation is assumed to influence.  Smaller values are more
+           conservative and will return smaller influence fractions.
+        """
+        li = lengthscale_influence  # shorthand reference
+        x_frac = self.lengthscales["x"] / self.bnd_range[0] * li
+        y_frac = self.lengthscales["y"] / self.bnd_range[1] * li
+        z_frac = self.lengthscales["z"] / self.bnd_range[2] * li
+        if self.use_sph:
+            # Fraction of the area of a sphere cap to the total surface area
+            sph_frac = (1 - np.cos(self.lengthscales["sph"]*li)) / 2
+            return x_frac * y_frac * z_frac * sph_frac
+        else:
+            p_frac = self.lengthscales["p"] / self.bnd_range[3] * li
+            t_frac = self.lengthscales["t"] / self.bnd_range[4] * li
+            s_frac = self.lengthscales["s"] / self.bnd_range[5] * li
+            return x_frac * y_frac * z_frac * p_frac * t_frac * s_frac
+
     def fit_lengthscales(self, n=500, calculator=None, write_logs=True,
-                         variance_transform=None):
+                         variance_function=None):
         """Use Lennard-Jones and BFGS to optimize the length scales
 
         The default length scales will not work for every system.  In
@@ -288,7 +340,7 @@ class BASC(object):
         Jones, and then use BFGS to maximize the likelihood of the GP
         while varying the length scales.
 
-        -- {variance_transform} (optional, default None): see auto_gp
+        -- {variance_function} (optional, default None): see auto_gp
            for details.
         """
 
@@ -308,9 +360,12 @@ class BASC(object):
         ]).reshape(n,1)
 
         mu,std = scipy.stats.norm.fit(D)
-        var = std**2
-        if variance_transform is not None:
-            var = variance_transform(var, D)
+
+        if variance_function is not None:
+            var = variance_function(D)
+        else:
+            var = std**2
+
         gp = self.gp_with(X, D, mu, var)
 
         # Run the optimizer (the slower step)
@@ -335,17 +390,18 @@ class BASC(object):
             self.lengthscales["t"] = float(gp.kern.t.lengthscale)
             self.lengthscales["s"] = float(gp.kern.s.lengthscales)
 
-    def run_iteration(self, write_logs=True, **kwargs):
+    def run_iteration(self, write_logs=True, nsobol=1, **kwargs):
         """Run an iteration of Bayesian Optimization
 
-        If no iterations had been run previously, default to using the
-        first point from the SOBOL sequence.
+        If fewer than {nsobol} iterations had been run previously, default to
+        using the next point in the SOBOL sequence instead of maximizing the
+        expected improvement.
 
         Any keyword arguments will be passed to {auto_gp}.
         """
 
-        if len(self.X) < 4:
-            x = self.sobol_points(4)[len(self.X)]
+        if len(self.X) < nsobol:
+            x = self.sobol_points(nsobol)[len(self.X)]
         else:
             gp = self.auto_gp(self.X, self.Y, write_logs=write_logs, **kwargs)
             x = gp.max_expected_improvement()

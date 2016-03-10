@@ -27,6 +27,9 @@ subsets of the cores.
          +-> [Step 3] -^
 """
 
+try: from configparser import ConfigParser  # Python 3
+except ImportError: from ConfigParser import ConfigParser  # Python 2
+
 from ase import Atoms
 import ase.io
 import ase.parallel
@@ -36,29 +39,39 @@ import numpy as np
 from basc.basc import BASC
 from basc.gpaw_trained import obtain_traces
 
-# Constants
-log_dir = "logs/demo"
+config = ConfigParser()
+config.read("BASC.ini")
+
+# Load config options
+log_dir = config.get("General", "log_dir")
+results_dir = config.get("General", "results_dir")
+seed = int(config.get("General", "seed"))
+adsorbate = ase.io.read(config.get("Adsorbate", "structure"))
+phi_length = int(config.get("Adsorbate", "phi_length"))
+gpaw_kwargs = eval(config.get("GPAW", "kwargs"))
+num_training_pts = int(config.get("GPAW", "num_training_pts"))
+
+# Write logs iff we are the master process
 write_logs = (mpi.world.rank==0)
-molecule_CO = Atoms("CO", positions=[(0.,0.,1.128),(0.,0.,0.)])
 
 # Load the relaxed surface from Step 1.
-relaxed_surf = ase.io.read("samples/Fe2O3_relaxed_surface.cif")
+relaxed_surf = ase.io.read("%s/relaxed_surface.cif" % results_dir)
 
 # Make the BASC instance.  Refer to the BASC docstrings for more
 # options for the parameters.
-basc = BASC(relaxed_surf, molecule_CO, 0, noise_variance=1e-6,
-            write_logs=write_logs)
+basc = BASC(relaxed_surf, adsorbate, phi_length, noise_variance=1e-4,
+            seed=seed, write_logs=write_logs)
 
 # Obtain training points for GPAWTrained
-training_X = basc.sobol_points(8)
+training_X = basc.sobol_points(num_training_pts)
 training_atomses = [basc.atoms_from_point(point) for point in training_X]
 training_Y = obtain_traces(
     training_atomses,
     write_logs=write_logs,
     communicator=mpi.world.new_communicator(list(range(mpi.world.size))),
     txt=ase.parallel.paropen("%s/gpaw.log" % log_dir, "a"),
-    spinpol=True
+    **gpaw_kwargs
 )
 
 # Save the traces
-np.savez("samples/Fe2O3_training.npz", X=training_X, Y=training_Y)
+np.savez("%s/training.npz" % results_dir, X=training_X, Y=training_Y)

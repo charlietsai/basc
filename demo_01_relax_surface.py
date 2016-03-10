@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Copyright (c) 2016, Shane Frederic F. Carr
 # 
 # Permission to use, copy, modify, and/or distribute this software for any
@@ -22,6 +24,9 @@ This step can benefit from multiple cores.
          +-> [Step 3] -^
 """
 
+try: from configparser import ConfigParser  # Python 3
+except ImportError: from ConfigParser import ConfigParser  # Python 2
+
 import os
 
 import ase.io
@@ -30,16 +35,26 @@ from gpaw import GPAW, mpi
 
 import basc.utils
 
-# Constants
-log_dir = "logs/demo"
+config = ConfigParser()
+config.read("BASC.ini")
+
+# Load config options
+log_dir = config.get("General", "log_dir")
+results_dir = config.get("General", "results_dir")
+cell = ase.io.read(config.get("Material", "cell"))
+hkl = eval(config.get("Material", "hkl"))  # eval() to get the tuple
+width = int(config.get("Material", "width"))
+fluid_layers = int(config.get("Material", "fluid_layers"))
+fixed_layers = int(config.get("Material", "fixed_layers"))
+gpaw_kwargs = eval(config.get("GPAW", "kwargs"))
+
+# Write logs iff we are the master process
 write_logs = (mpi.world.rank==0)
 
-# Load the unit cell.
-# You could also load it from Materials Project, for example.
-cell = ase.io.read("samples/Fe2O3_unit_cell.cif")
-
-# Make the log directory if necessary
+# Make the log and results directories if necessary
 try: os.mkdir(log_dir)
+except OSError: pass
+try: os.mkdir(results_dir)
 except OSError: pass
 
 # Run relaxation
@@ -48,15 +63,15 @@ relaxed_surf = basc.utils.relax_surface_cell(
     GPAW(
         communicator=mpi.world.new_communicator(list(range(mpi.world.size))),
         txt=ase.parallel.paropen("%s/gpaw.log" % log_dir, "a"),
-        spinpol=True
+        **gpaw_kwargs
     ),
     log_dir,
     write_logs,
-    hkl=(0,0,1),  # Miller indices
-    width=1,  # number of times to copy unit cell in x/y
-    fluid_layers=1,  # number of layers in which atoms can move
-    fixed_layers=1  # number of layers in which atoms are fixed
+    hkl=hkl,
+    width=width,
+    fluid_layers=fluid_layers,
+    fixed_layers=fixed_layers
 )
 
 # Save relaxed surface for next step
-ase.io.write("samples/Fe2O3_relaxed_surface.cif", relaxed_surf)
+ase.io.write("%s/relaxed_surface.cif" % results_dir, relaxed_surf)
