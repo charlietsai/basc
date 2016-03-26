@@ -12,6 +12,7 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+from ase import Atom
 from ase.calculators.lj import LennardJones
 import GPy
 import numpy as np
@@ -28,9 +29,10 @@ class BASC(object):
     relating to the BASC framework.
     """
 
-    def __init__(self, relaxed_surf, adsorbate, phi_length=0, mol_index=0,
-                 noise_variance=1e-4, seed=0, write_logs=True,
-                 xbounds=(0,1), ybounds=(0,1), zbounds=(1.5,2.5)):
+    def __init__(self, relaxed_surf, adsorbate, phi_length=2*np.pi,
+                 mol_index=0, noise_variance=1e-4, seed=0, verbose=True,
+                 xbounds=(0,1), ybounds=(0,1), zbounds=(1.5,2.5),
+                 add_adsorbate_method=None):
         """
         -- {relaxed_surf}: An empty surface cell onto which the adsorbate
            molecule can be placed.
@@ -62,6 +64,10 @@ class BASC(object):
            enough range such that the molecule is sufficiently close to the
            surface for any Euler angles, but not so close that the
            adsorbate's atoms are placed deep inside the surface.
+
+        -- {add_adsorbate_method}: Function to call when adding an adsorbate
+           to the surface.  Defaults to basc.utils.add_adsorbate_fractional,
+           and any other method should have the same signature.
         """
 
         self.relaxed_surf = relaxed_surf
@@ -71,9 +77,12 @@ class BASC(object):
         self.seed = seed
         self.X = np.array([])
         self.Y = np.array([])
+        self.verbose = verbose
         self._training_data = None
         self._calculator = None
+        self._lengthscales = None
 
+        # Phi length
         if phi_length == 0:
             self.use_sph = True
             self.bounds = np.array([
@@ -87,18 +96,13 @@ class BASC(object):
                 (0,phi_length), (0,np.pi), (0,2*np.pi) # p, t, s
             ])
 
-        # Set default values for the length scales (these will be overwritten
-        # by the length scale optimizer).  In a 5-D system (phi_length==0),
-        # only x, y, z, and sph are used; in a 6-D system, p, t, and s are
-        # user instead of sph.
-        self.lengthscales = {
-            "x": 0.2, "y": 0.2, "z": 0.5,
-            "p": phi_length/4., "t": np.pi/8, "s": np.pi/8,
-            "sph": np.pi/8
-        }
+        # Adsorbate method
+        if add_adsorbate_method is None:
+            add_adsorbate_method = utils.add_adsorbate_fractional
+        self.add_adsorbate_method = add_adsorbate_method
 
         # Print header
-        if write_logs:
+        if self.verbose:
             print("BASC: INITIALIZED")
             print("Surface: %s" % self.relaxed_surf.get_name())
             print("Adsorbate: %s" % self.adsorbate.get_name())
@@ -109,6 +113,7 @@ class BASC(object):
             print("xbounds: %s" % str(xbounds))
             print("ybounds: %s" % str(ybounds))
             print("zbounds: %s" % str(zbounds))
+            print("add_adsorbate_method: %s" % str(add_adsorbate_method))
 
     def atoms_from_parameters(self, x, y, z, p, t, s):
         """Return an ASE Atoms object corresponding to the given parameters
@@ -119,7 +124,7 @@ class BASC(object):
         adsorbate = self.adsorbate.copy()
         adsorbate.rotate_euler(phi=p, theta=t, psi=s)
         surf = self.relaxed_surf.copy()
-        utils.add_adsorbate_fractional(
+        self.add_adsorbate_method(
             surf, adsorbate, x, y, z, self.mol_index)
         return surf
 
@@ -139,24 +144,15 @@ class BASC(object):
             surf = self.atoms_from_parameters(*point)
         return surf
 
-    def objective_fn(self, point, calculator=None):
+    def objective_fn(self, point):
         """Evaluate the potential energy at {point}.
 
         -- {calculator} (optional): use this calculator instead of the one
            specified by a call to {set_calculator}.
         """
 
-        # Default to internal calculator
-        if calculator is None:
-            calculator = self._calculator
-
-        # If calculator is still none, throw an exception
-        if calculator is None:
-            raise RuntimeError("You must specify a calculator as a keyword "
-                               "argument or via the {set_calculator} method")
-
         surf = self.atoms_from_point(point)
-        surf.set_calculator(calculator)
+        surf.set_calculator(self.calculator)
         pot = surf.get_potential_energy()
         if pot > 0:
             pot = np.log(pot)
@@ -175,8 +171,91 @@ class BASC(object):
                 ]) \
                 * self.bnd_range + self.bnd_lower
 
-    def set_calculator(self, calculator):
-        self._calculator = calculator
+    def sobol_atomses(self, n):
+        """Return *n* ASE Atoms objects from a SOBOL set"""
+        return [
+            self.atoms_from_point(point)
+            for point in self.sobol_points(n)
+        ]
+
+    @property
+    def calculator(self):
+        """The calculator to use when evaluating the objective function"""
+
+        if self._calculator is None:
+            self._calculator = LennardJones()
+            if self.verbose:
+                print("BASC: Using Lennard-Jones calculator!")
+
+        return self._calculator
+
+    @calculator.setter
+    def calculator(self, value):
+        self._calculator = value
+        if self.verbose:
+            print("BASC: Setting calculator to: %s" % str(value))
+
+    @property
+    def lengthscales(self):
+        """The length scales used by the GP to model the objective function"""
+
+        if self._lengthscales is None:
+            self._lengthscales = self.default_lengthscales()
+            if self.verbose:
+                print("BASC: Using default length scales: %s"
+                    % str(self._lengthscales))
+
+        return self._lengthscales
+
+    @lengthscales.setter
+    def lengthscales(self, value):
+        self._lengthscales = value
+        if self.verbose:
+            print("BASC: Setting length scales to: %s" % str(value))
+
+    def default_lengthscales(self):
+        """Returns an object with default length scales based on cell size"""
+
+        xmin = self.bnd_lower[0]
+        xmax = self.bnd_upper[0]
+        ymin = self.bnd_lower[1]
+        ymax = self.bnd_upper[1]
+
+        # Measure the x-length of the unit cell
+        measure_surf = self.relaxed_surf.copy()
+        self.add_adsorbate_method(measure_surf, Atom("H"), xmin, ymin, 0, 0)
+        self.add_adsorbate_method(measure_surf, Atom("H"), xmax, ymin, 0, 0)
+        xdist = measure_surf.get_distance(-1, -2)
+
+        # Measure the y-length of the unit cell
+        measure_surf = self.relaxed_surf.copy()
+        self.add_adsorbate_method(measure_surf, Atom("H"), xmin, ymin, 0, 0)
+        self.add_adsorbate_method(measure_surf, Atom("H"), xmin, ymax, 0, 0)
+        ydist = measure_surf.get_distance(-1, -2)
+
+        # Let 1 Angstrom (1E-10 meters) be 1 length scale.  1 Angstrom is
+        # a typical bond length in crystal structures.
+        xscale = 1. / xdist
+        yscale = 1. / ydist
+
+        if self.use_sph:
+            return {
+                "x": xscale,
+                "y": yscale,
+                "z": 0.25,
+                "sph": np.pi/6
+            }
+
+        else:
+            return {
+                "x": xscale,
+                "y": yscale,
+                "z": 0.25,
+                "p": np.pi/4,
+                "t": np.pi/4,
+                "s": np.pi/4
+            }
+
 
     def gp_with(self, X, D, prior_mean, kernel_variance):
         """Return a GP using the BASC kernel and the given data
@@ -192,7 +271,6 @@ class BASC(object):
         """
 
         # Construct the kernel
-        # FIXME: lengthscale range for z?
         kern_x = make_periodic_kernel(
             "x", [0], kernel_variance, self.lengthscales["x"],
             self.bnd_range[0])
@@ -209,14 +287,14 @@ class BASC(object):
             kern = kern_x * kern_y * kern_z * kern_sph
 
         else:
-            kern_x = make_periodic_kernel(
-                "p", [3], kernel_variance, self.lengthscales["x"],
+            kern_p = make_periodic_kernel(
+                "p", [3], kernel_variance, self.lengthscales["p"],
                 self.bnd_range[3])
-            kern_z = make_rbf_kernel(
-                "t", [4], kernel_variance, self.lengthscales["z"],
+            kern_t = make_rbf_kernel(
+                "t", [4], kernel_variance, self.lengthscales["t"],
                 self.bnd_range[4])
-            kern_y = make_periodic_kernel(
-                "s", [5], kernel_variance, self.lengthscales["y"],
+            kern_s = make_periodic_kernel(
+                "s", [5], kernel_variance, self.lengthscales["s"],
                 self.bnd_range[5])
             kern = kern_x * kern_y * kern_z * kern_p * kern_t * kern_s
 
@@ -233,17 +311,23 @@ class BASC(object):
             seed=self.seed, name="BASC")
         return gp
 
-    def auto_gp(self, X, D, ei_probe_n=100, write_logs=True,
+    def auto_gp(self, X, D, influence_factor=2., base_variance=10.,
                 variance_function=None, mean_function=None,
-                base_variance=None, lengthscale_influence=None):
+                ei_probe_n=100,):
         """Make a GP using automatic values for mean and variance
 
         This function ensures that expected improvement is well-defined
         over the parameter space.
 
-        -- {ei_probe_n} (optional, default 100): the number of SOBOL
-           points at which to evaluate the expected improvement to ensure
-           that it is well-defined.
+        -- {base_variance} (default 10 eV) and {influence_factor}: values
+           to plug into the default explore-first-exploit-later variance
+           scheduling function:
+
+               base_variance * np.exp(1 - (len(D)*frac)**2)
+
+           where {frac} is from {influence_fraction} called with the
+           provided {influence_factor}.  If {variance_function} is specified,
+           it will take precendence.
 
         -- {variance_function} (optional): a lambda function taking a list
            of function observations and returning the variance to be used
@@ -254,32 +338,16 @@ class BASC(object):
         -- {mean_function} (optional): like above, but for the mean rather
            than the variance.
 
-        -- {base_variance} and {lengthscale_influence} (optional): values
-           to plug into the default explore-first-exploit-later variance
-           scheduling function:
-               base_variance * np.exp(1 - (len(D)*influence_frac)**2)
-           where {influence_frac} is from {observation_influence_fraction}
-           called with the provided {lengthscale_influence}.  If
-           {variance_function} is specified, it will take precendence.
+        -- {ei_probe_n} (optional, default 100): the number of SOBOL
+           points at which to evaluate the expected improvement to ensure
+           that it is well-defined.
         """
-        # mu,std = scipy.stats.norm.fit(D)
-        # var = std**2
-        # nY = (3*len(D))//4
-        # mu = np.partition(D, nY)[nY]
-        # mu = np.mean(D)
-        # var = (mu-np.min(D))**2
-        # mu = -186.0
-        # var = 100 * np.exp(-(len(D)/70.)**2) + 1.
 
         if variance_function is not None:
             var = variance_function(D)
-        elif base_variance is not None and lengthscale_influence is not None:
-            influence_frac = self.observation_influence_fraction(
-                lengthscale_influence)
-            var = base_variance * np.exp(1 - (len(D)*influence_frac)**2)
-            if write_logs: print("influence frac: %f" % influence_frac)
         else:
-            var = np.stdev(D)**2
+            frac = self.influence_fraction(influence_factor)
+            var = base_variance * np.exp(1 - (len(D)*frac)**2)
 
         if mean_function is not None:
             mu = mean_function(D)
@@ -290,15 +358,14 @@ class BASC(object):
         if var < np.spacing(1):
             var = np.sqrt(np.spacing(1))
 
-        if write_logs:
-            print("mu and var: %.6f, %.6f" % (mu, var))
-
+        # Ensure that the variance isn't so small that it leads to numerical
+        # instability when calculating the expected improvement
         eipts = self.sobol_points(ei_probe_n)
         while True:
             gp = self.gp_with(X, D, mu, var)
             if np.median(gp.expected_improvement(eipts)) <= float("-inf"):
                 var *= 2
-                if write_logs:
+                if self.verbose:
                     print("note: doubled variance to %.6f for "
                           "numerical stability" % var)
             else:
@@ -306,17 +373,17 @@ class BASC(object):
 
         return gp
 
-    def observation_influence_fraction(self, lengthscale_influence=2):
+    def influence_fraction(self, influence_factor):
         """What fraction of the parameter space will an observation incluence
 
         This method is useful for calculating exploration/exploitation
         scheduling tradeoffs.
 
-        -- {lengthscale_influence}: the number of length scales away that an
+        -- {influence_factor}: the number of length scales away that an
            observation is assumed to influence.  Smaller values are more
            conservative and will return smaller influence fractions.
         """
-        li = lengthscale_influence  # shorthand reference
+        li = influence_factor  # shorthand reference
         x_frac = self.lengthscales["x"] / self.bnd_range[0] * li
         y_frac = self.lengthscales["y"] / self.bnd_range[1] * li
         z_frac = self.lengthscales["z"] / self.bnd_range[2] * li
@@ -330,68 +397,79 @@ class BASC(object):
             s_frac = self.lengthscales["s"] / self.bnd_range[5] * li
             return x_frac * y_frac * z_frac * p_frac * t_frac * s_frac
 
-    def fit_lengthscales(self, n=500, calculator=None, write_logs=True,
-                         variance_function=None):
-        """Use Lennard-Jones and BFGS to optimize the length scales
+    def fit_lengthscales(self, n=500, variance_function=None):
+        """Use Lennard-Jones and BFGS to optimize the length scales.
 
-        The default length scales will not work for every system.  In
-        order to fit them to an individual system, we can generate {n}
-        data points using a cheap {calculator}, defaulting to Lennard-
-        Jones, and then use BFGS to maximize the likelihood of the GP
-        while varying the length scales.
+        The default length scales will work well for many systems.  However,
+        we can fit them to an individual system by maximizing the GP's
+        likelihood.  To do this, we can generate {n} data points using a
+        cheap calculator, defaulting to Lennard-Jones, and then use BFGS
+        to maximize the likelihood of the GP while varying the length scales.
+
+        Caution: Double-check the length scales by hand when using this
+        method.  It may give unexpected results.  If in doubt, stick with the
+        default length scales, which are based on the size of the unit cell.
+
+        -- {n}: number of points to evaluate.
 
         -- {variance_function} (optional, default None): see auto_gp
            for details.
         """
 
-        if calculator is None:
-            calculator = LennardJones()
-
-        if write_logs:
-            print("BASC: FITTING LENGTH SCALES")
-            print("n: %d" % n)
-            print("calculator: %s" % str(calculator))
+        if self.verbose:
+            print("BASC: Fitting length scales (n=%d)" % n)
 
         # Pre-process: generate data (relatively fast if LJ is used)
         X = self.sobol_points(n)
         D = np.array([
-            self.objective_fn(point, calculator)
+            self.objective_fn(point)
             for point in X
         ]).reshape(n,1)
 
-        mu,std = scipy.stats.norm.fit(D)
-
+        # Mean/Variance
+        mu = np.mean(D)
         if variance_function is not None:
             var = variance_function(D)
         else:
-            var = std**2
+            var = np.std(D)**2
+
+        if self.verbose:
+            print("Mean: %f" % mu)
+            print("Variance: %f" % var)
 
         gp = self.gp_with(X, D, mu, var)
 
         # Run the optimizer (the slower step)
-        if write_logs:
+        if self.verbose:
             print "\n---\nBefore Optimization:\n"
             print gp
 
-        gp.optimize(messages=write_logs)
+        gp.optimize(messages=self.verbose)
 
-        if write_logs:
+        if self.verbose:
             print "\n---\nAfter Optimization:\n"
             print gp
 
         # Save results
-        self.lengthscales["x"] = float(gp.kern.x.lengthscales)
-        self.lengthscales["y"] = float(gp.kern.y.lengthscales)
-        self.lengthscales["z"] = float(gp.kern.z.lengthscale)
         if self.use_sph:
-            self.lengthscales["sph"] = float(gp.kern.sph.lengthscale)
+            self.lengthscales = {
+                "x": float(gp.kern.x.lengthscales),
+                "y": float(gp.kern.y.lengthscales),
+                "z": float(gp.kern.z.lengthscale),
+                "sph": float(gp.kern.sph.lengthscale),
+            }
         else:
-            self.lengthscales["p"] = float(gp.kern.p.lengthscales)
-            self.lengthscales["t"] = float(gp.kern.t.lengthscale)
-            self.lengthscales["s"] = float(gp.kern.s.lengthscales)
+            self.lengthscales = {
+                "x": float(gp.kern.x.lengthscales),
+                "y": float(gp.kern.y.lengthscales),
+                "z": float(gp.kern.z.lengthscale),
+                "p": float(gp.kern.p.lengthscales),
+                "t": float(gp.kern.t.lengthscale),
+                "s": float(gp.kern.s.lengthscales),
+            }
 
-    def run_iteration(self, write_logs=True, nsobol=1, **kwargs):
-        """Run an iteration of Bayesian Optimization
+    def run_iteration(self, nsobol, i=None, **kwargs):
+        """Run a single iteration of Bayesian Optimization
 
         If fewer than {nsobol} iterations had been run previously, default to
         using the next point in the SOBOL sequence instead of maximizing the
@@ -403,30 +481,57 @@ class BASC(object):
         if len(self.X) < nsobol:
             x = self.sobol_points(nsobol)[len(self.X)]
         else:
-            gp = self.auto_gp(self.X, self.Y, write_logs=write_logs, **kwargs)
+            gp = self.auto_gp(self.X, self.Y, **kwargs)
             x = gp.max_expected_improvement()
 
         try:
             y = self.objective_fn(x)
-        except RuntimeError:
-            # "Atoms too close!"
+        except RuntimeError, err:
+            # Probably "Atoms too close!"
             y = np.max(self.Y)
-            if write_logs:
-                print("ATOMS TOO CLOSE!  Returning maximum observation")
+            if self.verbose:
+                print("Runtime exception!  Returning maximum observation")
+                print(err)
 
         self.add_xy(x, y)
 
-        if write_logs:
-            print("ITERATION: y=%f, x=%s" % (y, str(x)))
+        if self.verbose:
+            if i is not None:
+                print("ITERATION %d: y=%f, x=%s" % (i, y, str(x)))
+            else:
+                print("ITERATION: y=%f, x=%s" % (y, str(x)))
 
+    def run(self, niter=None, influence_factor=2., nsobol=1, **kwargs):
+        """Run BASC to convergence using the default number of iterations.
+
+        Any keyword arguments will be passed to {run_iteration}.
+        """
+
+        if niter is None:
+            frac = self.influence_fraction(influence_factor)
+            niter = int(2/frac)
+
+        for i in range(niter):
+            self.run_iteration(nsobol, i,
+                influence_factor=influence_factor, **kwargs)
+
+        return self.best
+
+    @property
     def best(self):
-        """Return the best observation from BASC"""
+        """Return the best observation from BASC, a four-tuple:
+
+        -- {point}: the coordinates of the solution in BASC's parameter space
+        -- {energy}: the potential energy of the solution
+        -- {iter}: the iteration number at which the solution was reached
+        -- {atoms}: an ASE Atoms object corresponding to the solution
+        """
 
         iter = np.argmin(self.Y)
-        y = self.Y[iter]
-        x = self.X[iter]
+        energy = self.Y[iter]
+        point = self.X[iter]
         atoms = self.atoms_from_point(x)
-        return x,y,iter,atoms
+        return point,energy,iter,atoms
 
     def add_xy(self, x, y):
         input_dim = 5 if self.use_sph else 6

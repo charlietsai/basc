@@ -19,7 +19,12 @@ from .energy_model import EnergyConvergenceModel
 
 class GPAWIterator(GPAW):
     """Extension of GPAW that runs a fixed number of iterations"""
-    def __init__(self, niter=1, **kwargs):
+
+    def __init__(self, niter, **kwargs):
+        """
+        -- {niter}: How many iterations to run
+        """
+
         GPAW.__init__(self, **kwargs)
         self.observed_energies = []
         self.niter = niter
@@ -104,12 +109,82 @@ class GPAWTrained(GPAWIterator):
     Other methods, like {get_forces()}, are not transformed.
     """
 
-    def __init__(self, training_data, **kwargs):
-        GPAWIterator.__init__(self, **kwargs)
-        self.energy_model = EnergyConvergenceModel(training_data, **kwargs)
+    def __init__(self, niter=1, model_class=None, model_kwargs={}, verbose=True,
+        **kwargs):
+        """
+        -- {niter}: how many SCF iterations to run before returning the
+           predicted energy
+
+        -- {model_class}: the class to use for the predictive energy model
+           (defaults to basc.energy_model.EnergyConvergenceModel)
+
+        -- {model_kwargs}: keyword arguments to be passed to
+           EnergyConvergenceModel when it is initialized
+
+        -- {verbose}: whether or not to write detailed logs to standard out
+
+        All other keyword arguments will be passed to GPAW.
+        """
+
+        GPAWIterator.__init__(self, niter, **kwargs)
+
+        if model_class is None:
+            model_class = EnergyConvergenceModel
+        self.model_class = model_class
+        self.model_kwargs = model_kwargs
+
+        self.traces = []
+
+    def obtain_traces(self, atomses, niter=50):
+        """Obtain a list of traces for predicting the final converged energy
+
+        -- {atomses}: A list of ASE Atoms objects to evaluate as the
+           training set.
+
+        -- {niter}: Number of iterations in each trace.  This number should
+           be large enough such that the final observation is sufficiently
+           close to the converged value.
+        """
+
+        # Save the prediction niter and replace it with the training niter
+        previous_niter = self.niter
+        self.niter = niter
+
+        # Print header
+        if self.verbose:
+            print("OBTAINING TRACES (%d iters)" % niter)
+
+        # Obtain the traces one by one.  If any calculations fail, ignore
+        # them and write a message to the log file.
+        for i,atoms in enumerate(atomses):
+            try:
+                self.obtain_trace(atoms)
+                if self.verbose:
+                    print("TRACE %d: %s" % (i, str(self.traces[-1])))
+            except Exception, err:
+                if self.verbose:
+                    print("FAILED GETTING TRACE %d: %s" % (i, str(err)))
+
+        # Restore the prediction niter
+        self.niter = previous_niter
+
+    def obtain_trace(self, atoms):
+        """Obtain a single trace corresponding to the ASE Atoms object"""
+        atoms.set_calculator(self)
+        self.run_all_iterations()
+        self.traces.append(self.observed_energies)
+
+    @property
+    def energy_model(self):
+        """This calculator's predictive energy model"""
+        return (self.model_class)(self.traces, **self.model_kwargs)
 
     def get_potential_energy(self, *args, **kwargs):
         """The final energy as predicted by the statistical model."""
+
+        if len(self._traces) is None:
+            raise ValueError("Can't predict final energy with just one trace!")
+
         self.run_all_iterations()
         return self.energy_model.mean_from_trace(self.observed_energies)
 
@@ -118,33 +193,9 @@ class GPAWTrained(GPAWIterator):
         """A normal distribution over the final energy.
 
         Returns an instance of {scipy.stats.norm}."""
+
+        if len(self._traces) is None:
+            raise ValueError("Can't predict final energy with just one trace!")
+
+        self.run_all_iterations()
         return self.energy_model.predict_from_trace(self.observed_energies)[0]
-
-
-def obtain_traces(atomses, niter=50, write_logs=True, **kwargs):
-    """Obtain a list of traces that can be used in {GPAWTrained}
-
-    -- {atomses}: A list of ASE Atoms objects to evaluate as the
-       training set.
-
-    -- {niter}: Number of iterations in each trace.  This number should
-       be large enough such that the final observation is sufficiently
-       close to the converged value.
-    """
-
-    # Print header
-    if write_logs:
-        print("OBTAINING TRACES")
-        print("niter: %d" % niter)
-        print("GPAW kwargs: %s" % str(kwargs))
-
-    calculator = GPAWIterator(niter, **kwargs)
-    traces = []
-    for atoms in atomses:
-        atoms.set_calculator(calculator)
-        calculator.run_all_iterations()
-        traces.append(calculator.observed_energies)
-        if write_logs:
-            print("TRACE: %s" % str(calculator.observed_energies))
-
-    return traces
