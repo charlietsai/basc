@@ -511,6 +511,12 @@ class BASC(object):
             frac = self.influence_fraction(influence_factor)
             niter = int(2/frac)
 
+        if self.verbose:
+            print("niter: %d" % niter)
+            print("influence_factor: %.2f" % influence_factor)
+            print("nsobol: %d" % nsobol)
+            print("kwargs: %s" % str(kwargs))
+
         for i in range(niter):
             self.run_iteration(nsobol, i,
                 influence_factor=influence_factor, **kwargs)
@@ -530,7 +536,7 @@ class BASC(object):
         iter = np.argmin(self.Y)
         energy = self.Y[iter]
         point = self.X[iter]
-        atoms = self.atoms_from_point(x)
+        atoms = self.atoms_from_point(point)
         return point,energy,iter,atoms
 
     def add_xy(self, x, y):

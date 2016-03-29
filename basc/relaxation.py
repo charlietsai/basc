@@ -14,6 +14,7 @@
 
 import os
 
+from ase import Atoms
 from ase.constraints import FixAtoms, StrainFilter
 import ase.io
 import ase.lattice.general_surface
@@ -143,6 +144,16 @@ def relax_basc_result(surf, relaxed_surf, calculator,
                       fixed_layers=1, fluid_layers=1,
                       log_dir=None, verbose=True):
     """Relax the structure of a BASC output."""
+
+    # Print header
+    if verbose:
+        print("BASC: RELAXING RESULT")
+        print("Compound: %s" % relaxed_surf.get_name())
+        print("Compound with Adsorbate: %s" % surf.get_name())
+        print("calculator: %s" % str(calculator))
+        print("log_dir: %s" % log_dir)
+        print("fluid_layers: %d" % fluid_layers)
+        print("fixed_layers: %d" % fixed_layers)
 
     # Make sure that the atoms are sorted by z coordinate (don't assume it).
     # This method of sorting the atoms feels a bit like a hack.  It has the

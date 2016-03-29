@@ -132,6 +132,7 @@ class GPAWTrained(GPAWIterator):
             model_class = EnergyConvergenceModel
         self.model_class = model_class
         self.model_kwargs = model_kwargs
+        self.verbose = verbose
 
         self.traces = []
 
@@ -182,7 +183,7 @@ class GPAWTrained(GPAWIterator):
     def get_potential_energy(self, *args, **kwargs):
         """The final energy as predicted by the statistical model."""
 
-        if len(self._traces) is None:
+        if len(self.traces) is None:
             raise ValueError("Can't predict final energy with just one trace!")
 
         self.run_all_iterations()
@@ -194,7 +195,7 @@ class GPAWTrained(GPAWIterator):
 
         Returns an instance of {scipy.stats.norm}."""
 
-        if len(self._traces) is None:
+        if len(self.traces) is None:
             raise ValueError("Can't predict final energy with just one trace!")
 
         self.run_all_iterations()

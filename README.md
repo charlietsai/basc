@@ -51,7 +51,7 @@ Set `basc.calculator` to the ASE-compatible calculator interface you want
 to use.  For BASC's accelerated GPAW calculator:
 
 ```python
-from basc.gpaw_trained import GPAWTrained, obtain_traces
+from basc.gpaw_trained import GPAWTrained
 
 # Make the calculator instance
 calculator = GPAWTrained()
@@ -64,8 +64,9 @@ calculator.obtain_traces(basc.sobol_atomses(8))
 basc.calculator = calculator
 ```
 
-You can obtain traces in a separate pre-processing job and save them in a
-numpy file:
+It's good practice to obtain traces in a separate pre-processing job and save
+them in a numpy file.  This way, if you need to tune the optimization
+parameters (see details below), you don't have to wait for the traces again:
 
 ```python
 import numpy as np
@@ -101,14 +102,17 @@ from gpaw import mpi
 # MPI communicator object for GPAW
 communicator = mpi.world.new_communicator(list(range(mpi.world.size)))
 
-# Tell BASC to be verbose on only one core, so that messages aren't logged
-# multiple times!
-basc = BASC(surface, molecule, verbose=(mpi.world.rank==0))
+# Tell BASC and GPAWTrained to be verbose on only one core, so that messages
+# aren't logged multiple times!
+basc = BASC(surface, molecule,
+    verbose = (mpi.world.rank==0)
+)
 
 # Make the calculator instance (you can include other kwargs)
 calculator = GPAWTrained(
-    txt = paropen("gpaw.log"),
-    communicator = communicator
+    txt = paropen("gpaw.log", "a"),
+    communicator = communicator,
+    verbose = (mpi.world.rank==0)
 )
 ```
 
@@ -117,12 +121,12 @@ is good practice to perform one additional structural relaxation on BASC's
 result if you need, for example, the energy of adsorption.
 
 ```python
-import basc.relaxation
+from basc.relaxation import relax_basc_result
 from gpaw import GPAW
 
 calculator = GPAW()
-basc.relaxation.relax_basc_result(solution, surface, calculator,
-                                  log_dir="logs", verbose=True)
+relax_basc_result(solution, surface, calculator,
+                  log_dir="logs", verbose=True)
 
 ase.io.write("solution_relaxed.cif", solution)
 ```
