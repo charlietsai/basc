@@ -22,6 +22,10 @@ In order to run BASC, you need a working installation of:
 I recommend running BASC on Linux, although it should run on any platform that
 supports these dependencies.
 
+Once the dependencies are configured, installing BASC is as simple as
+`sudo pip install basc` if you are the admin of your machine, or
+`pip install --user basc` if you are on a shared host.
+
 ## Quick Start
 
 To find the optimal binding site for a molecule on a surface using the fast
