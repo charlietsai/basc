@@ -51,6 +51,9 @@ print("Solution (%.6f eV) found on iteration %d" % (energy, iter))
 ase.io.write("solution.cif", solution)
 ```
 
+Some example surface slabs and molecule files can be found in the *samples*
+directory in BASC's Git repository.
+
 Set `basc.calculator` to the ASE-compatible calculator interface you want
 to use.  For BASC's accelerated GPAW calculator:
 
