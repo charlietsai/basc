@@ -441,14 +441,14 @@ class BASC(object):
 
         # Run the optimizer (the slower step)
         if self.verbose:
-            print "\n---\nBefore Optimization:\n"
-            print gp
+            print("\n---\nBefore Optimization:\n")
+            print(gp)
 
         gp.optimize(messages=self.verbose)
 
         if self.verbose:
-            print "\n---\nAfter Optimization:\n"
-            print gp
+            print("\n---\nAfter Optimization:\n")
+            print(gp)
 
         # Save results
         if self.use_sph:
@@ -486,7 +486,7 @@ class BASC(object):
 
         try:
             y = self.objective_fn(x)
-        except RuntimeError, err:
+        except (RuntimeError, err):
             # Probably "Atoms too close!"
             y = np.max(self.Y)
             if self.verbose:
