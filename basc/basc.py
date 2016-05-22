@@ -486,7 +486,7 @@ class BASC(object):
 
         try:
             y = self.objective_fn(x)
-        except (RuntimeError, err):
+        except RuntimeError as err:
             # Probably "Atoms too close!"
             y = np.max(self.Y)
             if self.verbose:

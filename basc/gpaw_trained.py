@@ -162,7 +162,7 @@ class GPAWTrained(GPAWIterator):
                 self.obtain_trace(atoms)
                 if self.verbose:
                     print("TRACE %d: %s" % (i, str(self.traces[-1])))
-            except (Exception, err):
+            except Exception as err:
                 if self.verbose:
                     print("FAILED GETTING TRACE %d: %s" % (i, str(err)))
 
