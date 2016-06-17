@@ -419,3 +419,6 @@ basc.run(
 )
 ```
 
+## Citations
+
+The ICML paper can be found here: http://jmlr.org/proceedings/papers/v48/carr16.pdf
