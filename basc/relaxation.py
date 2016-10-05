@@ -17,7 +17,7 @@ import os
 from ase import Atoms
 from ase.constraints import FixAtoms, StrainFilter
 import ase.io
-import ase.lattice.general_surface
+import ase.lattice.surface
 from ase.optimize import BFGS
 import numpy as np
 import scipy.optimize
@@ -125,7 +125,7 @@ def relax_surface_cell(cell, calculator, log_dir=None, verbose=True,
 
     # Set up system
     total_layers = fluid_layers + fixed_layers
-    surf = ase.lattice.general_surface.surface(
+    surf = ase.lattice.surface.surface(
         cell.repeat((width,width,1)),
         hkl,
         total_layers,

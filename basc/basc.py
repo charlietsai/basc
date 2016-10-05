@@ -1,9 +1,9 @@
 # Copyright (c) 2016, Shane Frederic F. Carr
-# 
+#
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
 # copyright notice and this permission notice appear in all copies.
-# 
+#
 # THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
 # WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
 # MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -23,16 +23,18 @@ from .expected_improvement import GPExpectedImprovement
 from .kernels import Spherical
 from .sobol_lib import i4_sobol
 
+
 class BASC(object):
     """
     This class encapsulates functionality for the majority of operations
     relating to the BASC framework.
     """
 
-    def __init__(self, relaxed_surf, adsorbate, phi_length=2*np.pi,
+    def __init__(self, relaxed_surf, adsorbate, phi_length=2 * np.pi,
                  mol_index=0, noise_variance=1e-4, seed=0, verbose=True,
-                 xbounds=(0,1), ybounds=(0,1), zbounds=(1.5,2.5),
-                 add_adsorbate_method=None):
+                 xbounds=(0, 1), ybounds=(0, 1), zbounds=(1.5, 2.5),
+                 add_adsorbate_method=None,
+                 structural_optimizer=None):
         """
         -- {relaxed_surf}: An empty surface cell onto which the adsorbate
            molecule can be placed.
@@ -68,6 +70,9 @@ class BASC(object):
         -- {add_adsorbate_method}: Function to call when adding an adsorbate
            to the surface.  Defaults to basc.utils.add_adsorbate_fractional,
            and any other method should have the same signature.
+
+        -- {structural_optimizer}: Configuration for specifying true will run
+            structural optimizations.
         """
 
         self.relaxed_surf = relaxed_surf
@@ -81,19 +86,20 @@ class BASC(object):
         self._training_data = None
         self._calculator = None
         self._lengthscales = None
+        self._structural_optimizer = structural_optimizer
 
         # Phi length
         if phi_length == 0:
             self.use_sph = True
             self.bounds = np.array([
-                xbounds, ybounds, zbounds, # x, y, z
-                (0,np.pi), (0,2*np.pi) # incl, azim
+                xbounds, ybounds, zbounds,  # x, y, z
+                (0, np.pi), (0, 2 * np.pi)  # incl, azim
             ])
         else:
             self.use_sph = False
             self.bounds = np.array([
-                xbounds, ybounds, zbounds, # x, y, z
-                (0,phi_length), (0,np.pi), (0,2*np.pi) # p, t, s
+                xbounds, ybounds, zbounds,  # x, y, z
+                (0, phi_length), (0, np.pi), (0, 2 * np.pi)  # p, t, s
             ])
 
         # Adsorbate method
@@ -104,8 +110,8 @@ class BASC(object):
         # Print header
         if self.verbose:
             print("BASC: INITIALIZED")
-            print("Surface: %s" % self.relaxed_surf.get_name())
-            print("Adsorbate: %s" % self.adsorbate.get_name())
+            print("Surface: %s" % ''.join(self.relaxed_surf.get_chemical_symbols()))
+            print("Adsorbate: %s" % ''.join(self.adsorbate.get_chemical_symbols()))
             print("phi_length: %f" % phi_length)
             print("mol_index: %d" % mol_index)
             print("noise_variance: %f" % noise_variance)
@@ -137,22 +143,30 @@ class BASC(object):
         """
 
         if self.use_sph:
-            # Note that incl/azim are converted to lat/lon inside of 
-            x,y,z,incl,azim = point
+            # Note that incl/azim are converted to lat/lon inside of
+            x, y, z, incl, azim = point
             surf = self.atoms_from_parameters(x, y, z, 0, incl, azim)
         else:
             surf = self.atoms_from_parameters(*point)
         return surf
 
-    def objective_fn(self, point):
+    def objective_fn(self, point, iteration=None):
         """Evaluate the potential energy at {point}.
 
         -- {calculator} (optional): use this calculator instead of the one
-           specified by a call to {set_calculator}.
+           specified by a call to {set_calculator}
+        -- {iteration} (optional): iteration of the algorithm
         """
 
         surf = self.atoms_from_point(point)
         surf.set_calculator(self.calculator)
+        if self._structural_optimizer is not None:
+            struct_opt = self._structural_optimizer['optimizer']
+            dyn = struct_opt(atoms=surf,
+                             **self._structural_optimizer['opt_conf'])
+            dyn.run(**self._structural_optimizer['run_conf'])
+            surf.write('step_{}_opt.traj'.format(iteration))
+
         pot = surf.get_potential_energy()
         if pot > 0:
             pot = np.log(pot)
@@ -162,13 +176,13 @@ class BASC(object):
         """Return *n* SOBOL points in the BASC parameter space"""
         if self.use_sph:
             return np.array([
-                    i4_sobol(5, i+self.seed)[0] for i in range(n)
-                ]) \
+                i4_sobol(5, i + self.seed)[0] for i in range(n)
+            ]) \
                 * self.bnd_range + self.bnd_lower
         else:
             return np.array([
-                    i4_sobol(6, i+self.seed)[0] for i in range(n)
-                ]) \
+                i4_sobol(6, i + self.seed)[0] for i in range(n)
+            ]) \
                 * self.bnd_range + self.bnd_lower
 
     def sobol_atomses(self, n):
@@ -203,7 +217,7 @@ class BASC(object):
             self._lengthscales = self.default_lengthscales()
             if self.verbose:
                 print("BASC: Using default length scales: %s"
-                    % str(self._lengthscales))
+                      % str(self._lengthscales))
 
         return self._lengthscales
 
@@ -243,7 +257,7 @@ class BASC(object):
                 "x": xscale,
                 "y": yscale,
                 "z": 0.25,
-                "sph": np.pi/6
+                "sph": np.pi / 6
             }
 
         else:
@@ -251,11 +265,10 @@ class BASC(object):
                 "x": xscale,
                 "y": yscale,
                 "z": 0.25,
-                "p": np.pi/4,
-                "t": np.pi/4,
-                "s": np.pi/4
+                "p": np.pi / 4,
+                "t": np.pi / 4,
+                "s": np.pi / 4
             }
-
 
     def gp_with(self, X, D, prior_mean, kernel_variance):
         """Return a GP using the BASC kernel and the given data
@@ -283,7 +296,7 @@ class BASC(object):
 
         if self.use_sph:
             kern_sph = make_spherical_kernel(
-                "sph", [3,4], kernel_variance, self.lengthscales["sph"])
+                "sph", [3, 4], kernel_variance, self.lengthscales["sph"])
             kern = kern_x * kern_y * kern_z * kern_sph
 
         else:
@@ -347,7 +360,7 @@ class BASC(object):
             var = variance_function(D)
         else:
             frac = self.influence_fraction(influence_factor)
-            var = base_variance * np.exp(1 - (len(D)*frac)**2)
+            var = base_variance * np.exp(1 - (len(D) * frac)**2)
 
         if mean_function is not None:
             mu = mean_function(D)
@@ -389,7 +402,7 @@ class BASC(object):
         z_frac = self.lengthscales["z"] / self.bnd_range[2] * li
         if self.use_sph:
             # Fraction of the area of a sphere cap to the total surface area
-            sph_frac = (1 - np.cos(self.lengthscales["sph"]*li)) / 2
+            sph_frac = (1 - np.cos(self.lengthscales["sph"] * li)) / 2
             return x_frac * y_frac * z_frac * sph_frac
         else:
             p_frac = self.lengthscales["p"] / self.bnd_range[3] * li
@@ -424,7 +437,7 @@ class BASC(object):
         D = np.array([
             self.objective_fn(point)
             for point in X
-        ]).reshape(n,1)
+        ]).reshape(n, 1)
 
         # Mean/Variance
         mu = np.mean(D)
@@ -485,7 +498,7 @@ class BASC(object):
             x = gp.max_expected_improvement()
 
         try:
-            y = self.objective_fn(x)
+            y = self.objective_fn(x, iteration=i)
         except RuntimeError as err:
             # Probably "Atoms too close!"
             y = np.max(self.Y)
@@ -509,7 +522,7 @@ class BASC(object):
 
         if niter is None:
             frac = self.influence_fraction(influence_factor)
-            niter = int(2/frac)
+            niter = int(2 / frac)
 
         if self.verbose:
             print("niter: %d" % niter)
@@ -519,7 +532,7 @@ class BASC(object):
 
         for i in range(niter):
             self.run_iteration(nsobol, i,
-                influence_factor=influence_factor, **kwargs)
+                               influence_factor=influence_factor, **kwargs)
 
         return self.best
 
@@ -537,11 +550,11 @@ class BASC(object):
         energy = self.Y[iter]
         point = self.X[iter]
         atoms = self.atoms_from_point(point)
-        return point,energy,iter,atoms
+        return point, energy, iter, atoms
 
     def add_xy(self, x, y):
         input_dim = 5 if self.use_sph else 6
-        self.X = np.append(self.X, x).reshape(len(self.X)+1, input_dim)
+        self.X = np.append(self.X, x).reshape(len(self.X) + 1, input_dim)
         self.Y = np.vstack(np.append(self.Y, y))
 
     @property
@@ -560,6 +573,8 @@ class BASC(object):
         return self.bnd_upper - self.bnd_lower
 
 # Helper functions
+
+
 def make_periodic_kernel(name, active_dims, variance, lengthscale, range):
     kern = GPy.kern.StdPeriodic(
         input_dim=1, active_dims=active_dims,
@@ -568,21 +583,25 @@ def make_periodic_kernel(name, active_dims, variance, lengthscale, range):
         name=name)
     kern.variance.constrain_fixed(warning=False)
     kern.wavelengths.constrain_fixed(warning=False)
-    kern.lengthscales.constrain_bounded(range/16., range/1., warning=False)
+    kern.lengthscales.constrain_bounded(range / 16., range / 1., warning=False)
     return kern
+
+
 def make_rbf_kernel(name, active_dims, variance, lengthscale, range):
     kern = GPy.kern.RBF(
         input_dim=1, active_dims=active_dims,
         variance=variance, lengthscale=lengthscale,
         name=name)
     kern.variance.constrain_fixed(warning=False)
-    kern.lengthscale.constrain_bounded(range/16., range/1., warning=False)
+    kern.lengthscale.constrain_bounded(range / 16., range / 1., warning=False)
     return kern
+
+
 def make_spherical_kernel(name, active_dims, variance, lengthscale):
     kern = Spherical(
         input_dim=2, active_dims=active_dims,
         variance=variance, lengthscale=lengthscale,
         name=name)
     kern.variance.constrain_fixed(warning=False)
-    kern.lengthscale.constrain_bounded(np.pi/16, np.pi/3, warning=False)
+    kern.lengthscale.constrain_bounded(np.pi / 16, np.pi / 3, warning=False)
     return kern
