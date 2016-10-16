@@ -12,16 +12,59 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-from ase import Atom
-from ase.calculators.lj import LennardJones
-import GPy
+import os
 import numpy as np
 import scipy.stats
+
+import GPy
+
+from ase import Atom
+import ase.io
+from ase.calculators.lj import LennardJones
+from ase.calculators.calculator import Calculator, all_properties
 
 from . import utils
 from .expected_improvement import GPExpectedImprovement
 from .kernels import Spherical
 from .sobol_lib import i4_sobol
+
+
+class SinglePointCalculator(Calculator):
+    """Special calculator for a single configuration.
+    Used to remember the energy, force and stress for a given
+    configuration.  If the positions, atomic numbers, unit cell, or
+    boundary conditions are changed, then asking for
+    energy/forces/stress will raise an exception.
+
+    Included to work with different ASE versions.
+    """
+
+    name = 'unknown'
+
+    def __init__(self, atoms, **results):
+        """Save energy, forces, stress, ... for the current configuration."""
+        Calculator.__init__(self)
+        self.results = {}
+        for property, value in results.items():
+            assert property in all_properties
+            if value is None:
+                continue
+            if property in ['energy', 'magmom', 'free_energy']:
+                self.results[property] = value
+            else:
+                self.results[property] = np.array(value, float)
+        self.atoms = atoms.copy()
+
+    def get_property(self, name, atoms=None, allow_calculation=True):
+        if name not in self.results or self.check_state(atoms):
+            if allow_calculation:
+                raise NotImplementedError(
+                    'The property "{0}" is not available.'.format(name))
+            return None
+        result = self.results[name]
+        if isinstance(result, np.ndarray):
+            result = result.copy()
+        return result
 
 
 class BASC(object):
@@ -150,22 +193,19 @@ class BASC(object):
             surf = self.atoms_from_parameters(*point)
         return surf
 
-    def objective_fn(self, point, iteration=None):
+    def objective_fn(self, point):
         """Evaluate the potential energy at {point}.
 
         -- {calculator} (optional): use this calculator instead of the one
            specified by a call to {set_calculator}
-        -- {iteration} (optional): iteration of the algorithm
         """
 
         surf = self.atoms_from_point(point)
         surf.set_calculator(self.calculator)
         if self._structural_optimizer is not None:
             struct_opt = self._structural_optimizer['optimizer']
-            dyn = struct_opt(atoms=surf,
-                             **self._structural_optimizer['opt_conf'])
+            dyn = struct_opt(atoms=surf, **self._structural_optimizer['opt_conf'])
             dyn.run(**self._structural_optimizer['run_conf'])
-            surf.write('step_{}_opt.traj'.format(iteration))
 
         pot = surf.get_potential_energy()
         if pot > 0:
@@ -498,7 +538,7 @@ class BASC(object):
             x = gp.max_expected_improvement()
 
         try:
-            y = self.objective_fn(x, iteration=i)
+            y = self.objective_fn(x)
         except RuntimeError as err:
             # Probably "Atoms too close!"
             y = np.max(self.Y)
@@ -507,6 +547,11 @@ class BASC(object):
                 print(err)
 
         self.add_xy(x, y)
+
+        traj = ase.io.PickleTrajectory('basc_out.traj', 'a')
+        atoms = self.atoms_from_point(x)
+        atoms.set_calculator(SinglePointCalculator(atoms, energy=y))
+        traj.write(atoms)
 
         if self.verbose:
             if i is not None:
@@ -531,8 +576,7 @@ class BASC(object):
             print("kwargs: %s" % str(kwargs))
 
         for i in range(niter):
-            self.run_iteration(nsobol, i,
-                               influence_factor=influence_factor, **kwargs)
+            self.run_iteration(nsobol, i, influence_factor=influence_factor, **kwargs)
 
         return self.best
 
@@ -579,11 +623,11 @@ def make_periodic_kernel(name, active_dims, variance, lengthscale, range):
     kern = GPy.kern.StdPeriodic(
         input_dim=1, active_dims=active_dims,
         variance=variance, lengthscale=lengthscale,
-        wavelength=range,  # i.e., period
+        period=range,  # i.e., period
         name=name)
     kern.variance.constrain_fixed(warning=False)
-    kern.wavelengths.constrain_fixed(warning=False)
-    kern.lengthscales.constrain_bounded(range / 16., range / 1., warning=False)
+    kern.period.constrain_fixed(warning=False)
+    kern.lengthscale.constrain_bounded(range / 16., range / 1., warning=False)
     return kern
 
 
